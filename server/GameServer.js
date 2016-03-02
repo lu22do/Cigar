@@ -441,14 +441,13 @@ GameServer.prototype.mainLoop = function() {
             // Update leaderboard with the gamemode's method
             this.leaderboard = [];
             this.gameMode.updateLB(this);
-            this.lb_packet = new Packet.UpdateLeaderboard(this.leaderboard, this.gameMode.packetLB);
+            this.lb_packet = new Packet.UpdateLeaderboard(this.leaderboard,this.gameMode.packetLB);
+
             this.tickMain = 0; // Reset
         }
 
-        // Server auto restart
-        if (this.config.serverRestartTime > 0 && ( local - this.startTime ) > ( this.config.serverRestartTime * 3600000 )) {
-            this.exitServer();
-        }
+        // Debug
+        //console.log(this.tick - 50);
 
         // Reset
         this.tick = 0;
@@ -583,14 +582,39 @@ GameServer.prototype.virusCheck = function() {
     }
 };
 
+GameServer.prototype.getDist = function(x1, y1, x2, y2){ // Use Pythagoras theorem
+    var deltaX = Math.abs(x1 - x2);
+    var deltaY = Math.abs(y1 - y2);
+    return Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+}
+
 GameServer.prototype.updateMoveEngine = function() {
     // Move player cells
     var len = this.nodesPlayer.length;
+
+    // Sort cells to move the cells close to the mouse first
+    var srt = [];
+    for (var i = 0; i < len; i++)
+    srt[i] = i;
+
+    for (var i = 0; i < len; i++){
+    for (var j = i + 1; j < len; j++){
+        var clientI = this.nodesPlayer[srt[i]].owner;
+        var clientJ = this.nodesPlayer[srt[j]].owner;
+        if (this.getDist( this.nodesPlayer[srt[i]].position.x, this.nodesPlayer[srt[i]].position.y, clientI.mouse.x, clientI.mouse.y ) >
+        this.getDist( this.nodesPlayer[srt[j]].position.x, this.nodesPlayer[srt[j]].position.y, clientJ.mouse.x, clientJ.mouse.y )){
+        var aux = srt[i];
+        srt[i] = srt[j];
+        srt[j] = aux;
+        }
+    }
+    }
+
     for (var i = 0; i < len; i++) {
-        var cell = this.nodesPlayer[i];
+        var cell = this.nodesPlayer[srt[i]];
 
         // Do not move cells that have already been eaten or have collision turned off
-        if ((!cell) || (cell.ignoreCollision)) {
+        if (!cell){
             continue;
         }
 
@@ -600,7 +624,7 @@ GameServer.prototype.updateMoveEngine = function() {
 
         // Check if cells nearby
         var list = this.getCellsInRange(cell);
-        for (var j = 0; j < list.length; j++) {
+        for (var j = 0; j < list.length ; j++) {
             var check = list[j];
 
             // if we're deleting from this.nodesPlayer, fix outer loop variables; we need to update its length, and maybe 'i' too
@@ -612,7 +636,7 @@ GameServer.prototype.updateMoveEngine = function() {
             }
 
             // Consume effect
-            check.onConsume(cell, this);
+            check.onConsume(cell,this);
 
             // Remove cell
             check.setKiller(cell);
@@ -691,18 +715,20 @@ GameServer.prototype.splitCells = function(client) {
         // Get starting position
         var size = cell.getSize() / 2;
         var startPos = {
-            x: cell.position.x + (size * Math.sin(angle)),
-            y: cell.position.y + (size * Math.cos(angle))
+            x: cell.position.x,
+            y: cell.position.y
         };
         // Calculate mass and speed of splitting cell
-        var splitSpeed = cell.getSpeed() * 6;
         var newMass = cell.mass / 2;
         cell.mass = newMass;
         // Create cell
-        var split = new Entity.PlayerCell(this.getNextNodeId(), client, startPos, newMass);
+        var split = new Entity.PlayerCell(this.getNextNodeId(), client, startPos, newMass, this);
         split.setAngle(angle);
-        split.setMoveEngineData(splitSpeed, 32, 0.85);
+        var splitSpeed = 130;
+        split.setMoveEngineData(splitSpeed, 32, 0.85); //vanilla agar.io = 130, 32, 0.85
         split.calcMergeTime(this.config.playerRecombineTime);
+        split.ignoreCollision = true;
+        split.restoreCollisionTicks = 10; //vanilla agar.io = 10
 
         // Add to moving cells list
         this.setAsMovingNode(split);
@@ -756,7 +782,7 @@ GameServer.prototype.newCellVirused = function(client, parent, angle, mass, spee
     // Create cell
     newCell = new Entity.PlayerCell(this.getNextNodeId(), client, startPos, mass);
     newCell.setAngle(angle);
-    newCell.setMoveEngineData(speed, 10);
+    newCell.setMoveEngineData(speed, 15);
     newCell.calcMergeTime(this.config.playerRecombineTime);
     newCell.ignoreCollision = true; // Turn off collision
 
@@ -815,7 +841,7 @@ GameServer.prototype.getCellsInRange = function(cell) {
         }
 
         // AABB Collision
-        if (!check.collisionCheck(bottomY, topY, rightX, leftX)) {
+        if (!check.collisionCheck2(squareR, cell.position)) {
             continue;
         }
 
@@ -906,11 +932,16 @@ GameServer.prototype.getNearestVirus = function(cell) {
 
         // Add to list of cells nearby
         virus = check;
+        break;
     }
     return virus;
 };
 
 GameServer.prototype.updateCells = function() {
+    if (!this.run) {
+        // Server is paused
+        return;
+    }
     // Loop through all player cells
     var massDecay = 1 - (this.config.playerMassDecayRate * this.gameMode.decayMod);
     for (var i = 0; i < this.nodesPlayer.length; i++) {
@@ -1039,15 +1070,27 @@ GameServer.prototype.switchSpectator = function(player) {
 
 // Custom prototype functions
 WebSocket.prototype.sendPacket = function(packet) {
-    // Send only if the buffer is empty
-    if (this.readyState == WebSocket.OPEN && (this._socket.bufferSize == 0)) {
-        try {
-            this.send(packet.build(), {binary: true});
-        } catch (e) {
-            // console.log("\u001B[31m[Socket Error] " + e + "\u001B[0m");
+    function getBuf(data) {
+        var array = new Uint8Array(data.buffer || data);
+        var l = data.byteLength || data.length;
+        var o = data.byteOffset || 0;
+        var buffer = new Buffer(l);
+
+        for (var i = 0; i < l; i++) {
+            buffer[i] = array[o + i];
         }
+
+        return buffer;
+    }
+
+    //if (this.readyState == WebSocket.OPEN && (this._socket.bufferSize == 0) && packet.build) {
+    if (this.readyState == WebSocket.OPEN && packet.build) {
+        var buf = packet.build();
+        this.send(getBuf(buf), {binary: true});
+    } else if (!packet.build) {
+        // Do nothing
     } else {
-        // Remove socket
+        this.readyState = WebSocket.CLOSED;
         this.emit('close');
         this.removeAllListeners();
     }

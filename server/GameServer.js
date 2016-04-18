@@ -28,6 +28,7 @@ function GameServer(realmID, confile) {
     this.clients = [];
     this.nodes = [];
     this.nodesVirus = []; // Virus nodes
+    this.nodeBlackHole = undefined; 
     this.nodesEjected = []; // Ejected mass nodes
     this.nodesPlayer = []; // Nodes controlled by players
 
@@ -75,8 +76,6 @@ function GameServer(realmID, confile) {
         borderBottom: 6000, // Bottom border of map (Vanilla value: 11180.3398875)
         chatMaxMessageLength: 70, // Length of messages in chat
         chatIntervalTime: 2500, // ms between each message.
-        chatBlockedWords: "fuck;bitch", // Words to filter from chat
-        chatBlockedWordsTo: "****", // Word to change filtered words to.
         spawnInterval: 20, // The interval between each food cell spawn in ticks (1 tick = 50 ms)
         foodSpawnAmount: 10, // The amount of food to spawn per interval
         foodStartAmount: 100, // The starting amount of food in the map
@@ -107,8 +106,6 @@ function GameServer(realmID, confile) {
         playerFDMultiplier: 2, // Fast decay multiplier
         playerFDMass: 5000, // Mass to start fast decay at.
         playerNameBlock: "", // Names to block from playing.
-        playerBetterSplits: 1, // Better cell splits.
-        playerSplitSpeed: 8, // Split speed of the cells.
         tourneyMaxPlayers: 12, // Maximum amount of participants for tournament style game modes
         tourneyPrepTime: 10, // Amount of ticks to wait after all players are ready (1 tick = 1000 ms)
         tourneyEndTime: 30, // Amount of ticks to wait after a player wins (1 tick = 1000 ms)
@@ -137,6 +134,7 @@ GameServer.prototype.start = function() {
     }, function() {
         // Spawn starting food
         this.startingFood();
+        this.spawnBlackHole();
 
         // Start Main Loop
         setInterval(this.mainLoop.bind(this), 1);
@@ -500,9 +498,13 @@ GameServer.prototype.spawnFood = function() {
     this.currentFood++;
 };
 
+GameServer.prototype.spawnBlackHole = function() {
+    var bH = new Entity.BlackHole(this.getNextNodeId(), null, {x: 500, y: 500}, this.config.virusStartMass);
+    this.addNode(bH);
+};
+
 GameServer.prototype.spawnPlayer = function(player, pos, mass) {
     var isAdmin = false;
-
     // Check for config
     if (this.config.adminConfig == 1) {
         // Make the required variables
@@ -510,33 +512,59 @@ GameServer.prototype.spawnPlayer = function(player, pos, mass) {
         nadminArray = this.config.adminNewNames.split(";");
 
         // Removes people trying fake admin
-        for (i = 0; i < nadminArray.length; i++) {
-            if (player.name == nadminArray[i]) {
-                console.log("\u001B[31m[Master]\u001B[0m User tried to spawn with " + nadminArray[i] + " but was denied!");
-                player.name = "";
+        var iq = 0;
+
+        function checkName() {
+            if (iq !== nadminArray.length) {
+                if (player.name == nadminArray[iq]) {
+                    console.log("\u001B[31m[Master]\u001B[0m User tried to spawn with " + nadminArray[iq] + " but was denied!");
+                    player.name = "";
+                } else {
+                    iq++;
+                    checkName();
+                }
             }
         }
 
         // Checks for users with password name
-        for (i = 0; i < adminArray.length; i++) {
-            if (player.name == adminArray[i]) {
-                isAdmin = true;
-                console.log("\u001B[31m[Master]\u001B[0m " + nadminArray[i] + " has successfully logged in using " + adminArray[i]);
-                player.name = nadminArray[i];
+        var ii = 0;
+
+        function checkAdmin() {
+            if (ii !== adminArray.length) {
+                if (player.name == adminArray[ii]) {
+                    isAdmin = true;
+                    console.log("\u001B[31m[Master]\u001B[0m " + nadminArray[ii] + " has successfully logged in using " + adminArray[ii]);
+                } else {
+                    ii++;
+                    checkAdmin();
+                }
             }
         }
+
+        // Run the functions
+        if (this.config.adminBlockNames == 1) {
+            checkName();
+        }
+        checkAdmin();
     }
 
     // Name block stuff!
     if (this.config.playerNameBlock.length > 0) {
         blockedNames = this.config.playerNameBlock.split(";");
+        var iz = 0;
 
-        for (i = 0; i < blockedNames.length; i++) {
-            if (player.name == blockedNames[i]) {
-                console.log("\u001B[31m[Master]\u001B[0m User tried to spawn with " + blockedNames[i] + " but was denied!");
-                player.name = "";
+        function nameBlock() {
+            if (iz !== blockedNames.length) {
+                if (player.name == blockedNames[iz]) {
+                    console.log("\u001B[31m[Master]\u001B[0m User tried to spawn with " + blockedNames[iz] + " but was denied!");
+                    player.name = "";
+                } else {
+                    iz++;
+                    nameBlock();
+                }
             }
         }
+        nameBlock();
     }
 
     if (pos == null) { // Get random pos
@@ -548,7 +576,8 @@ GameServer.prototype.spawnPlayer = function(player, pos, mass) {
     }
 
     // Spawn player and add to world
-    if (isAdmin) {
+    if (isAdmin == true) {
+        player.name = nadminArray[ii];
         var cell = new Entity.PlayerCell(this.getNextNodeId(), player, pos, this.config.adminStartMass);
     } else {
         var cell = new Entity.PlayerCell(this.getNextNodeId(), player, pos, mass);
@@ -620,6 +649,45 @@ GameServer.prototype.virusCheck = function() {
     }
 };
 
+GameServer.prototype.teleport = function(cell) {
+    var done = false;
+    var count = 0;
+
+    while (!done && count < 10) {
+        var pos = this.getRandomPosition();
+
+        done = true;
+        count++;
+
+        // Check for players
+        for (var i = 0; i < this.nodesPlayer.length; i++) {
+            var check = this.nodesPlayer[i];
+
+            if ((cell.nodeId == check.nodeId) || (cell.ignoreCollision)) {
+                continue;
+            }
+
+            var r = check.getSize(); // Radius of checking player cell
+
+            var collisionDist = check.getSize() + cell.getSize + 50;
+
+            if ((Math.abs(check.position.x - cell.position.x) < collisionDist) &&
+                (Math.abs(check.position.y - cell.position.y) < collisionDist)) {
+                done = false;
+                break;
+            }
+        }
+
+
+    }
+
+    if (done) {
+        cell.position.x = pos.x;
+        cell.position.y = pos.y;        
+    }
+};
+
+
 GameServer.prototype.updateMoveEngine = function() {
     // Move player cells
     var len = this.nodesPlayer.length;
@@ -646,6 +714,10 @@ GameServer.prototype.updateMoveEngine = function() {
                 if (check.nodeId < cell.nodeId) {
                     i--;
                 }
+            }
+
+            if (check.cellType == 4) { // blackhole cannot be eaten
+                continue;
             }
 
             // Consume effect
@@ -705,7 +777,6 @@ GameServer.prototype.formatTime = function() {
 
 GameServer.prototype.splitCells = function(client) {
     var len = client.cells.length;
-
     for (var i = 0; i < len; i++) {
         if (client.cells.length >= this.config.playerMaxCells) {
             // Player cell limit
@@ -732,17 +803,28 @@ GameServer.prototype.splitCells = function(client) {
             x: cell.position.x + (size * Math.sin(angle)),
             y: cell.position.y + (size * Math.cos(angle))
         };
-
         // Calculate mass and speed of splitting cell
-        if (this.config.playerBetterSplits == 1) {
-            // Formula made by DaFudgeWizzad
-            var sf = Math.pow(0.99980, cell.mass);
-            var splitFormula = sf * 9.5;
-            var splitSpeed = cell.getSpeed() * splitFormula;
-        } else {
-            var splitSpeed = cell.getSpeed() * this.config.playerSplitSpeed;
+        if (cell.mass < 250) {
+            var splitSpeed = cell.getSpeed() * 9;
         }
-
+        if (cell.mass >= 250 && cell.mass < 500) {
+            var splitSpeed = cell.getSpeed() * 8;
+        }
+        if (cell.mass >= 500 && cell.mass < 1000) {
+            var splitSpeed = cell.getSpeed() * 7;
+        }
+        if (cell.mass >= 1000 && cell.mass < 2000) {
+            var splitSpeed = cell.getSpeed() * 6;
+        }
+        if (cell.mass >= 2000 && cell.mass < 4000) {
+            var splitSpeed = cell.getSpeed() * 5;
+        }
+        if (cell.mass >= 4000 && cell.mass < 8000) {
+            var splitSpeed = cell.getSpeed() * 4;
+        }
+        if (cell.mass >= 8000) {
+            var splitSpeed = cell.getSpeed() * 3;
+        }
         var newMass = cell.mass / 2;
         cell.mass = newMass;
         // Create cell
@@ -984,12 +1066,10 @@ GameServer.prototype.updateCells = function() {
         }
 
         // Mass decay
-        if (cell.mass >= this.config.playerMinMassDecay) {
-            if (cell.mass >= this.config.playerFDMass) {
-                cell.mass *= massDecay - (this.config.playerFDMultiplier / 500);
-            } else {
-                cell.mass *= massDecay;
-            }
+        if (cell.mass >= this.config.playerFDMass) {
+            cell.mass *= massDecay - (this.config.playerFDMultiplier / 500);
+        } else {
+            cell.mass *= massDecay;
         }
     }
 };
@@ -1092,15 +1172,17 @@ GameServer.prototype.switchSpectator = function(player) {
 
 // Custom prototype functions
 WebSocket.prototype.sendPacket = function(packet) {
-    if (this.readyState == WebSocket.OPEN && (this._socket.bufferSize == 0) && packet.build) {
+    // Send only if the buffer is empty
+    if (this.readyState == WebSocket.OPEN && (this._socket.bufferSize == 0)) {
         try {
-            this.send(packet.build(), {binary: true});
+            this.send(packet.build(), {
+                binary: true
+            });
         } catch (e) {
-            console.log("[Error] "+e);
-            this.emit('close');
-            this.removeAllListeners();
+            // console.log("\u001B[31m[Socket Error] " + e + "\u001B[0m");
         }
     } else {
+        // Remove socket
         this.emit('close');
         this.removeAllListeners();
     }

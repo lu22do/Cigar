@@ -63,7 +63,7 @@ PlayerCell.prototype.calcMove = function(x2, y2, gameServer) {
     var x1 = this.position.x + ( speed * Math.sin(angle) );
     var y1 = this.position.y + ( speed * Math.cos(angle) );
 
-    // Collision check for other cells
+    // Collision check for other cells of the player
     for (var i = 0; i < this.owner.cells.length;i++) {
         var cell = this.owner.cells[i];
 
@@ -98,6 +98,16 @@ PlayerCell.prototype.calcMove = function(x2, y2, gameServer) {
     }
     
     gameServer.gameMode.onCellMove(x1,y1,this);
+
+    var bH = gameServer.nodeBlackHole;
+    var collisionDist = bH.getSize() + r - 50; // Minimum distance between the 2 cells
+    if ((this.abs(x1 - bH.position.x) < collisionDist) &&
+        (this.abs(y1 - bH.position.y) < collisionDist)) {
+        console.log("bH Collide");
+        gameServer.teleport(this);
+        return;
+    }
+
 
     // Check to ensure we're not passing the world border
     if (x1 < config.borderLeft) {
